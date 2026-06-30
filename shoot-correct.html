@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>篮球投篮手势矫正</title>
+    <!-- MediaPipe CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            color: #fff;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        body {
+            background: #111;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .main-wrap {
+            display: flex;
+            flex: 1;
+        }
+        #video-box {
+            position: relative;
+            width: calc(100% - 260px);
+            height: 100%;
+            background: #000;
+        }
+        video, canvas#drawCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        /* 右侧卡片面板 */
+        .card-panel {
+            width: 260px;
+            background: #222;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        .card-title {
+            font-size: 14px;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+        .std-card {
+            background: #333;
+            margin: 8px 0;
+            padding: 10px;
+            height: 140px;
+            border-radius: 6px;
+        }
+        .std-canvas {
+            width: 100%;
+            height: 100px;
+            background: #2a2a2a;
+        }
+        /* 底部角度信息栏 */
+        .info-bar {
+            height: 120px;
+            background: #1a1a1a;
+            display: flex;
+        }
+        .info-item {
+            flex: 1;
+            border: 2px solid #50c878;
+            margin: 10px;
+            padding: 10px;
+            border-radius: 6px;
+        }
+        .angle-num {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 6px;
+        }
+        .tip-text {
+            font-size: 12px;
+            opacity: 0.8;
+        }
+        .camera-tip {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff6666;
+            font-size: 16px;
+            text-align: center;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 20px;
+            border-radius: 8px;
+            display: none;
+        }
+        .camera-tip.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-wrap">
+        <div id="video-box">
+            <video id="cam" autoplay muted playsinline></video>
+            <canvas id="drawCanvas"></canvas>
+            <div class="camera-tip" id="cameraTip">
+                摄像头未启动<br>请允许摄像头权限，并使用 Live Server 打开
+            </div>
+        </div>
+        <div class="card-panel">
+            <div class="card-title">训练步骤卡片</div>
+            <div class="std-card">
+                <canvas class="std-canvas" data-name="抬臂"></canvas>
+                <div>抬臂 117°~174°</div>
+            </div>
+            <div class="std-card">
+                <canvas class="std-canvas" data-name="举球"></canvas>
+                <div>举球 157°~221°</div>
+            </div>
+            <div class="std-card">
+                <canvas class="std-canvas" data-name="压腕"></canvas>
+                <div>压腕 153°~232°</div>
+            </div>
+            <div class="std-card">
+                <canvas class="std-canvas" data-name="辅助手"></canvas>
+                <div>辅助手 88°~170°</div>
+            </div>
+        </div>
+    </div>
+    <div class="info-bar">
+        <div class="info-item" data-key="抬臂">
+            <div class="angle-num">抬臂 --°</div>
+            <div class="tip-text">加载中...</div>
+        </div>
+        <div class="info-item" data-key="举球">
+            <div class="angle-num">举球 --°</div>
+            <div class="tip-text">加载中...</div>
+        </div>
+        <div class="info-item" data-key="压腕">
+            <div class="angle-num">压腕 --°</div>
+            <div class="tip-text">加载中...</div>
+        </div>
+        <div class="info-item" data-key="辅助手">
+            <div class="angle-num">辅助手 --°</div>
+            <div class="tip-text">加载中...</div>
+        </div>
+    </div>
+
+<script>
+// 标准角度（和你截图完全匹配）
+const STANDARD_ANGLES = {
+    "抬臂": { min: 117, max: 174, target: 145 },
+    "举球": { min: 157, max: 221, target: 189 },
+    "压腕": { min: 153, max: 232, target: 192 },
+    "辅助手": { min: 88, max: 170, target: 129 }
+};
+// 人体关节索引
+const POSE_LM = {
+    RIGHT_SHOULDER: 12,
+    RIGHT_ELBOW: 14,
+    RIGHT_WRIST: 16,
+    RIGHT_HIP: 24,
+    RIGHT_THUMB: 22,
+    LEFT_WRIST: 15
+};
+
+// 计算三点夹角
+function calcAngle(p1, p2, p3) {
+    const vec1 = [p1.x - p2.x, p1.y - p2.y];
+    const vec2 = [p3.x - p2.x, p3.y - p2.y];
+    const dot = vec1[0] * vec2[0] + vec1[1] * vec2[1];
+    const m1 = Math.hypot(vec1[0], vec1[1]);
+    const m2 = Math.hypot(vec2[0], vec2[1]);
+    if (m1 === 0 || m2 === 0) return 0;
+    const rad = Math.acos(dot / (m1 * m2));
+    return Math.round(rad * 180 / Math.PI);
+}
+
+// 矫正提示文字
+function getTip(name, curr) {
+    const s = STANDARD_ANGLES[name];
+    if (curr < s.min) return `偏小${s.min - curr}°，请伸直手臂`;
+    if (curr > s.max) return `偏大${curr - s.max}°，请压低关节`;
+    return "角度标准，保持手势";
+}
+
+// 绘制右侧标准卡片折线
+function drawStdLine(canvasDom, targetDeg) {
+    const ctx = canvasDom.getContext("2d");
+    const w = canvasDom.width = canvasDom.clientWidth || 220;
+    const h = canvasDom.height = canvasDom.clientHeight || 100;
+    ctx.clearRect(0, 0, w, h);
+    const midX = w / 2;
+    const midY = h / 2;
+    const len = Math.min(60, w / 3);
+    const rad = targetDeg * Math.PI / 180;
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = "#ffdd80";
+    ctx.beginPath();
+    ctx.moveTo(midX - len, midY);
+    ctx.lineTo(midX, midY);
+    ctx.lineTo(midX + len * Math.cos(rad), midY - len * Math.sin(rad));
+    ctx.stroke();
+    ctx.fillStyle = "#ffffaa";
+    ctx.beginPath(); ctx.arc(midX - len, midY, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(midX, midY, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(midX + len * Math.cos(rad), midY - len * Math.sin(rad), 5, 0, Math.PI * 2); ctx.fill();
+}
+
+// 初始化右侧四张标准卡片
+document.querySelectorAll(".std-canvas").forEach(cvs => {
+    const name = cvs.dataset.name;
+    drawStdLine(cvs, STANDARD_ANGLES[name].target);
+});
+
+// DOM元素
+const video = document.getElementById("cam");
+const drawCanvas = document.getElementById("drawCanvas");
+const cameraTip = document.getElementById("cameraTip");
+const ctx = drawCanvas.getContext("2d");
+
+// 初始化姿态模型
+const pose = new Pose({
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+});
+pose.setOptions({ modelComplexity: 1, smoothLandmarks: true });
+
+// 每一帧姿态渲染核心逻辑
+pose.onResults(res => {
+    const w = drawCanvas.width = video.videoWidth || 1280;
+    const h = drawCanvas.height = video.videoHeight || 720;
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    // 画面镜像翻转（和你原图左右一致）
+    ctx.scale(-1, 1);
+    ctx.translate(-w, 0);
+    // 绘制摄像头画面
+    ctx.drawImage(res.image, 0, 0, w, h);
+
+    // 无人体骨骼直接跳过
+    if (!res.poseLandmarks) {
+        ctx.restore();
+        return;
+    }
+    const lm = res.poseLandmarks;
+    // 坐标转换函数（归一化转画布像素）
+    const getPt = idx => ({
+        x: lm[idx].x * w,
+        y: lm[idx].y * h
+    });
+
+    // 提取投篮手全套关节点（手上虚拟节点）
+    const shoulder = getPt(POSE_LM.RIGHT_SHOULDER);
+    const elbow = getPt(POSE_LM.RIGHT_ELBOW);
+    const wrist = getPt(POSE_LM.RIGHT_WRIST);
+    const thumb = getPt(POSE_LM.RIGHT_THUMB);
+    const hip = getPt(POSE_LM.RIGHT_HIP);
+    const leftWrist = getPt(POSE_LM.LEFT_WRIST);
+
+    // 计算4组矫正角度
+    const angleData = {
+        "抬臂": calcAngle(hip, shoulder, elbow),
+        "举球": calcAngle(shoulder, elbow, wrist),
+        "压腕": calcAngle(elbow, wrist, thumb),
+        "辅助手": calcAngle(shoulder, leftWrist, wrist)
+    };
+
+    // 更新底部UI数值
+    Object.keys(angleData).forEach(name => {
+        const val = angleData[name];
+        const box = document.querySelector(`.info-item[data-key="${name}"]`);
+        box.querySelector(".angle-num").innerText = `${name} ${val}°`;
+        box.querySelector(".tip-text").innerText = getTip(name, val);
+    });
+
+    // ========== 绘制手臂/手上虚拟节点连线（重点：手上彩色标记点） ==========
+    ctx.lineWidth = 4;
+    // 肩 → 肘 黄色连线
+    ctx.strokeStyle = "#ffdd00";
+    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.stroke();
+    // 肘 → 手腕 蓝色连线
+    ctx.strokeStyle = "#00a0ff";
+    ctx.beginPath(); ctx.moveTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+    // 手腕 → 拇指（手部节点）浅蓝色
+    ctx.strokeStyle = "#88ddff";
+    ctx.beginPath(); ctx.moveTo(wrist.x, wrist.y); ctx.lineTo(thumb.x, thumb.y); ctx.stroke();
+    // 肩膀 → 辅助手（左手）浅灰线
+    ctx.strokeStyle = "#aaaaaa";
+    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(leftWrist.x, leftWrist.y); ctx.stroke();
+
+    // 关节圆点（手上虚拟标记节点）
+    ctx.fillStyle = "#ff2222"; ctx.beginPath(); ctx.arc(shoulder.x, shoulder.y, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffdd00"; ctx.beginPath(); ctx.arc(elbow.x, elbow.y, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#00a0ff"; ctx.beginPath(); ctx.arc(wrist.x, wrist.y, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#88ddff"; ctx.beginPath(); ctx.arc(thumb.x, thumb.y, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#cccccc"; ctx.beginPath(); ctx.arc(leftWrist.x, leftWrist.y, 5, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+});
+
+// 启动摄像头
+async function startCamera() {
+    try {
+        cameraTip.classList.remove("show");
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 1280, height: 720, facingMode: "user" }
+        });
+        video.srcObject = stream;
+        await video.play();
+        const camera = new Camera(video, {
+            onFrame: async () => await pose.send({ image: video }),
+            width: 1280,
+            height: 720
+        });
+        await camera.start();
+    } catch (err) {
+        console.error("摄像头错误", err);
+        cameraTip.classList.add("show");
+    }
+}
+startCamera();
+</script>
+</body>
+</html>
